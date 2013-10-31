@@ -23,45 +23,73 @@
 
 
 /*jslint vars: true, plusplus: true, devel: true, nomen: true, indent: 4, forin: true, maxerr: 50, regexp: true */
-/*global define, $, XMLHttpRequest */
+/*global define, $, XMLHttpRequest, window */
 
 /**
  * RemoteAgent defines and provides an interface for custom remote functions
  * loaded from RemoteFunctions. Remote commands are executed via
- * `call(name, varargs)`. Remote events are dispatched as events on the
- * Inspector named "Remote.EVENT".
+ * `call(name, varargs)`.
+ *
+ * Remote events are dispatched as events on this object.
  */
 define(function RemoteAgent(require, exports, module) {
     "use strict";
 
-    var Inspector = require("LiveDevelopment/Inspector/Inspector");
+    var $exports = $(exports);
+
+    var LiveDevelopment = require("LiveDevelopment/LiveDevelopment"),
+        Inspector       = require("LiveDevelopment/Inspector/Inspector"),
+        RemoteFunctions = require("text!LiveDevelopment/Agents/RemoteFunctions.js");
 
     var _load; // deferred load
     var _objectId; // the object id of the remote object
-
-    // WebInspector Event: Page.loadEventFired
-    function _onLoadEventFired(res) {
-        // res = {timestamp}
-        var request = new XMLHttpRequest();
-        request.open("GET", "LiveDevelopment/Agents/RemoteFunctions.js");
-        request.onload = function onLoad() {
-            var run = "window._LD=" + request.response + "()";
-            Inspector.Runtime.evaluate(run, function onEvaluate(res) {
-                console.assert(!res.wasThrown, res.result.description);
-                _objectId = res.result.objectId;
-                _load.resolve();
-            });
-        };
-        request.send(null);
-    }
+    var _intervalId; // interval used to send keepAlive events
 
     // WebInspector Event: DOM.attributeModified
-    function _onAttributeModified(res) {
+    function _onAttributeModified(event, res) {
         // res = {nodeId, name, value}
         var matches = /^data-ld-(.*)/.exec(res.name);
         if (matches) {
-            Inspector.trigger("RemoteAgent." + matches[1], res);
+            $exports.triggerHandler(matches[1], res);
         }
+    }
+
+    function _call(objectId, method, varargs) {
+        console.assert(objectId, "Attempted to call remote method without objectId set.");
+        var args = Array.prototype.slice.call(arguments, 2),
+            callback,
+            deferred = new $.Deferred();
+
+        // if the last argument is a function it is the callback function
+        if (typeof args[args.length - 1] === "function") {
+            callback = args.pop();
+        }
+
+        // Resolve node parameters
+        args = args.map(function (arg) {
+            if (arg && arg.nodeId) {
+                return arg.resolve();
+            }
+
+            return arg;
+        });
+
+        $.when.apply(undefined, args).done(function onResolvedAllNodes() {
+            var params = [];
+
+            args.forEach(function (arg) {
+                if (arg.objectId) {
+                    params.push({objectId: arg.objectId});
+                } else {
+                    params.push({value: arg});
+                }
+            });
+
+            Inspector.Runtime.callFunctionOn(objectId, method, params, undefined, callback)
+                .then(deferred.resolve, deferred.reject);
+        });
+
+        return deferred.promise();
     }
 
     /** Call a remote function
@@ -70,48 +98,72 @@ define(function RemoteAgent(require, exports, module) {
      * @param {string} function name
      */
     function call(method, varargs) {
-        console.assert(_objectId, "Attempted to call remote method without objectId set.");
-        var args = Array.prototype.slice.call(arguments, 1);
+        var argsArray = [_objectId, "_LD." + method];
 
-        // if the last argument is a function it is the callback function
-        var callback;
-        if (typeof args[args.length - 1] === "function") {
-            callback = args.pop();
+        if (arguments.length > 1) {
+            argsArray = argsArray.concat(Array.prototype.slice.call(arguments, 1));
         }
 
-        // Resolve node parameters
-        var i;
-        for (i in args) {
-            if (args[i].nodeId) {
-                args[i] = args[i].resolve();
-            }
+        return _call.apply(null, argsArray);
+    }
+
+    function _stopKeepAliveInterval() {
+        if (_intervalId) {
+            window.clearInterval(_intervalId);
+            _intervalId = null;
         }
-        $.when.apply(undefined, args).then(function onResolvedAllNodes() {
-            var i, arg, params = [];
-            for (i in arguments) {
-                arg = args[i];
-                if (arg.objectId) {
-                    params.push({objectId: arg.objectId});
-                } else {
-                    params.push({value: arg});
-                }
+    }
+
+    function _startKeepAliveInterval() {
+        _stopKeepAliveInterval();
+
+        _intervalId = window.setInterval(function () {
+            call("keepAlive");
+        }, 1000);
+    }
+
+    /**
+     * @private
+     * Cancel the keepAlive interval if the page reloads
+     */
+    function _onFrameStartedLoading(event, res) {
+        _stopKeepAliveInterval();
+    }
+
+    // WebInspector Event: Page.loadEventFired
+    function _onLoadEventFired(event, res) {
+        // res = {timestamp}
+
+        // inject RemoteFunctions
+        var command = "window._LD=" + RemoteFunctions + "(" + LiveDevelopment.config.experimental + ");";
+
+        Inspector.Runtime.evaluate(command, function onEvaluate(response) {
+            if (response.error || response.wasThrown) {
+                _load.reject(null, response.error);
+            } else {
+                _objectId = response.result.objectId;
+                _load.resolve();
+
+                _startKeepAliveInterval();
             }
-            Inspector.Runtime.callFunctionOn(_objectId, "_LD." + method, params, undefined, callback);
         });
     }
 
     /** Initialize the agent */
     function load() {
         _load = new $.Deferred();
-        Inspector.on("Page.loadEventFired", _onLoadEventFired);
-        Inspector.on("DOM.attributeModified", _onAttributeModified);
+        $(Inspector.Page).on("loadEventFired.RemoteAgent", _onLoadEventFired);
+        $(Inspector.Page).on("frameStartedLoading.RemoteAgent", _onFrameStartedLoading);
+        $(Inspector.DOM).on("attributeModified.RemoteAgent", _onAttributeModified);
+
         return _load.promise();
     }
 
     /** Clean up */
     function unload() {
-        Inspector.off("Page.loadEventFired", _onLoadEventFired);
-        Inspector.off("DOM.attributeModified", _onAttributeModified);
+        $(Inspector.Page).off(".RemoteAgent");
+        $(Inspector.DOM).off(".RemoteAgent");
+        _stopKeepAliveInterval();
     }
 
     // Export public functions

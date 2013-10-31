@@ -36,75 +36,45 @@ define(function (require, exports, module) {
 
 
     /**
-     * Contains a list of information about selectors for a single document. This array is populated
+     * Returns a list of information about selectors for a single document. This array is populated
      * by createSelectorList()
-     * @type {?Array.<FileLocation>}
+     * @return {?Array.<FileLocation>}
      */
-    var selectorList = null;
-
-    /** clears selectorList */
-    function done() {
-        selectorList = null;
-    }
-
-    // create function list and caches it in FileIndexMangager
     function createSelectorList() {
         var doc = DocumentManager.getCurrentDocument();
         if (!doc) {
             return;
         }
 
-        if (!selectorList) {
-            selectorList = [];
-            var docText = doc.getText();
-            selectorList = CSSUtils.extractAllSelectors(docText);
-        }
+        var selectorList = [];
+        var docText = doc.getText();
+        return CSSUtils.extractAllSelectors(docText);
     }
 
-    function getLocationFromSelectorName(selector) {
-        if (!selectorList) {
-            return null;
-        }
-        
-        // TODO: handle multiple selectors with same name in CSS file
-        var i, result;
-        for (i = 0; i < selectorList.length; i++) {
-            var selectorInfo = selectorList[i];
-            if (selectorInfo.selector === selector) {
-                result = selectorInfo;
-                break;
-            }
-        }
-
-        return result;
-    }
 
     /**
      * @param {string} query what the user is searching for
-     * @returns {Array.<string>} sorted and filtered results that match the query
+     * @returns {Array.<SearchResult>} sorted and filtered results that match the query
      */
-    function search(query) {
-        createSelectorList();
-
+    function search(query, matcher) {
+        var selectorList = matcher.selectorList;
+        if (!selectorList) {
+            selectorList = createSelectorList();
+            matcher.selectorList = selectorList;
+        }
         query = query.slice(query.indexOf("@") + 1, query.length);
+        
+        // Filter and rank how good each match is
         var filteredList = $.map(selectorList, function (itemInfo) {
-
-            var selector = itemInfo.selector;
-
-            if (selector.toLowerCase().indexOf(query.toLowerCase()) !== -1) {
-                return selector;
+            var searchResult = matcher.match(itemInfo.selector, query);
+            if (searchResult) {
+                searchResult.selectorInfo = itemInfo;
             }
-        }).sort(function (a, b) {
-            a = a.toLowerCase();
-            b = b.toLowerCase();
-            if (a > b) {
-                return -1;
-            } else if (a < b) {
-                return 1;
-            } else {
-                return 0;
-            }
+            return searchResult;
         });
+        
+        // Sort based on ranking & basic alphabetical order
+        QuickOpen.basicMatchSort(filteredList);
 
         return filteredList;
     }
@@ -124,20 +94,19 @@ define(function (require, exports, module) {
 
     /**
      * Select the selected item in the current document
-     * @param {HTMLLIElement} selectedItem
+     * @param {?SearchResult} selectedItem
      */
     function itemFocus(selectedItem) {
-        var selectorInfo = getLocationFromSelectorName($(selectedItem).text());
-        if (selectorInfo) {
-            var from = {line: selectorInfo.selectorStartLine, ch: selectorInfo.selectorStartChar};
-            var to = {line: selectorInfo.selectorStartLine, ch: selectorInfo.selectorEndChar};
-            EditorManager.getCurrentFullEditor().setSelection(from, to);
+        if (!selectedItem) {
+            return;
         }
+        var selectorInfo = selectedItem.selectorInfo;
+
+        var from = {line: selectorInfo.selectorStartLine, ch: selectorInfo.selectorStartChar};
+        var to = {line: selectorInfo.selectorStartLine, ch: selectorInfo.selectorEndChar};
+        EditorManager.getCurrentFullEditor().setSelection(from, to, true);
     }
 
-    /**
-     * TODO: selectedItem is currently a <LI> item from smart auto complete container. It should just be data
-     */
     function itemSelect(selectedItem) {
         itemFocus(selectedItem);
     }
@@ -147,8 +116,8 @@ define(function (require, exports, module) {
     QuickOpen.addQuickOpenPlugin(
         {
             name: "CSS Selectors",
-            fileTypes: ["css"],
-            done: done,
+            languageIds: ["css"],
+            done: function () {},
             search: search,
             match: match,
             itemFocus: itemFocus,

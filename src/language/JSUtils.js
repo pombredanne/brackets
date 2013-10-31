@@ -22,7 +22,7 @@
  */
 
 /*jslint vars: true, plusplus: true, devel: true, nomen: true, regexp: true, indent: 4, maxerr: 50 */
-/*global define, $, brackets, PathUtils, CodeMirror */
+/*global define, $, brackets, CodeMirror */
 
 /**
  * Set of utilities for simple parsing of JS text.
@@ -30,10 +30,13 @@
 define(function (require, exports, module) {
     "use strict";
     
+    var _ = require("thirdparty/lodash");
+    
     // Load brackets modules
     var Async                   = require("utils/Async"),
         DocumentManager         = require("document/DocumentManager"),
         ChangedDocumentTracker  = require("document/ChangedDocumentTracker"),
+        FileUtils               = require("file/FileUtils"),
         NativeFileSystem        = require("file/NativeFileSystem").NativeFileSystem,
         PerfUtils               = require("utils/PerfUtils"),
         StringUtils             = require("utils/StringUtils");
@@ -57,7 +60,8 @@ define(function (require, exports, module) {
     
     /**
      * @private
-     * Return an Array with names and offsets for all functions in the specified text
+     * Return an object mapping function name to offset info for all functions in the specified text.
+     * Offset info is an array, since multiple functions of the same name can exist.
      * @param {!string} text Document text
      * @return {Object.<string, Array.<{offsetStart: number, offsetEnd: number}>}
      */
@@ -257,13 +261,14 @@ define(function (require, exports, module) {
         // Filter for documents that contain the named function
         var result              = new $.Deferred(),
             matchedDocuments    = [],
-            rangeResults        = [],
-            functionsInDocument;
+            rangeResults        = [];
         
         docEntries.forEach(function (docEntry) {
-            functionsInDocument = docEntry.functions[functionName];
-            
-            if (functionsInDocument) {
+            // Need to call CollectionUtils.hasProperty here since docEntry.functions could
+            // have an entry for "hasOwnProperty", which results in an error if trying to
+            // invoke docEntry.functions.hasOwnProperty().
+            if (_.has(docEntry.functions, functionName)) {
+                var functionsInDocument = docEntry.functions[functionName];
                 matchedDocuments.push({doc: docEntry.doc, fileInfo: docEntry.fileInfo, functions: functionsInDocument});
             }
         });
@@ -358,23 +363,28 @@ define(function (require, exports, module) {
     }
     
     /**
-     * Return all functions that have the specified name.
+     * Return all functions that have the specified name, searching across all the given files.
      *
      * @param {!String} functionName The name to match.
      * @param {!Array.<FileIndexManager.FileInfo>} fileInfos The array of files to search.
+     * @param {boolean=} keepAllFiles If true, don't ignore non-javascript files.
      * @return {$.Promise} that will be resolved with an Array of objects containing the
      *      source document, start line, and end line (0-based, inclusive range) for each matching function list.
      *      Does not addRef() the documents returned in the array.
      */
-    function findMatchingFunctions(functionName, fileInfos) {
+    function findMatchingFunctions(functionName, fileInfos, keepAllFiles) {
         var result          = new $.Deferred(),
             jsFiles         = [],
             docEntries      = [];
         
-        // Filter fileInfos for .js files
-        jsFiles = fileInfos.filter(function (fileInfo) {
-            return (/^\.js/i).test(PathUtils.filenameExtension(fileInfo.fullPath));
-        });
+        if (!keepAllFiles) {
+            // Filter fileInfos for .js files
+            jsFiles = fileInfos.filter(function (fileInfo) {
+                return FileUtils.getFileExtension(fileInfo.fullPath).toLowerCase() === "js";
+            });
+        } else {
+            jsFiles = fileInfos;
+        }
         
         // RegExp search (or cache lookup) for all functions in the project
         _getFunctionsInFiles(jsFiles).done(function (docEntries) {
@@ -388,25 +398,25 @@ define(function (require, exports, module) {
     }
 
     /**
-     * Finds all instances of the specified functionName in "text".
+     * Finds all instances of the specified searchName in "text".
      * Returns an Array of Objects with start and end properties.
      *
      * @param text {!String} JS text to search
-     * @param functionName {!String} function name to search for
+     * @param searchName {!String} function name to search for
      * @return {Array.<{offset:number, functionName:string}>}
      *      Array of objects containing the start offset for each matched function name.
      */
-    function findAllMatchingFunctionsInText(text, functionName) {
+    function findAllMatchingFunctionsInText(text, searchName) {
         var allFunctions = _findAllFunctionsInText(text);
         var result = [];
         var lines = text.split("\n");
         
-        $.each(allFunctions, function (index, functions) {
-            if (index === functionName || functionName === "*") {
+        _.forEach(allFunctions, function (functions, functionName) {
+            if (functionName === searchName || searchName === "*") {
                 functions.forEach(function (funcEntry) {
                     var endOffset = _getFunctionEndOffset(text, funcEntry.offsetStart);
                     result.push({
-                        name: index,
+                        name: functionName,
                         lineStart: StringUtils.offsetToLineNum(lines, funcEntry.offsetStart),
                         lineEnd: StringUtils.offsetToLineNum(lines, endOffset)
                     });

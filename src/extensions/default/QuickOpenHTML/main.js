@@ -52,78 +52,62 @@ define(function (require, exports, module) {
     }
 
     /**
-     * Contains a list of information about ID's for a single document. This array is populated
+     * Returns a list of information about ID's for a single document. This array is populated
      * by createIDList()
      * @type {?Array.<FileLocation>}
      */
-    var idList = null;
-
-    /** clears idList */
-    function done() {
-        idList = null;
-    }
-
-    // create list of ids found in html file
     function createIDList() {
         var doc = DocumentManager.getCurrentDocument();
         if (!doc) {
             return;
         }
+        
+        var idList = [];
+        var docText = doc.getText();
+        var lines = docText.split("\n");
 
-        if (!idList) {
-            idList = [];
-            var docText = doc.getText();
-            var lines = docText.split("\n");
-
-
-            var regex = new RegExp(/\s*id\s*?=\s*?["'](.*?)["']/gi);
-            var id, chFrom, chTo, i, line;
-            for (i = 0; i < lines.length; i++) {
-                line = lines[i];
-                var info;
-                while ((info = regex.exec(line)) !== null) {
-                    id = info[1];
-                    // TODO: this doesn't handle id's that share the 
-                    // same portion of a name on the same line or when
-                    // the id and value are on different lines
-                    chFrom = line.indexOf(id);
-                    chTo = chFrom + id.length;
-                    idList.push(new FileLocation(null, i, chFrom, chTo, id));
-                }
+        var regex = new RegExp(/\s+id\s*?=\s*?["'](.*?)["']/gi);
+        var id, chFrom, chTo, i, line;
+        for (i = 0; i < lines.length; i++) {
+            line = lines[i];
+            var info;
+            while ((info = regex.exec(line)) !== null) {
+                id = info[1];
+                // TODO: this doesn't handle id's that share the 
+                // same portion of a name on the same line or when
+                // the id and value are on different lines
+                chFrom = line.indexOf(id);
+                chTo = chFrom + id.length;
+                idList.push(new FileLocation(null, i, chFrom, chTo, id));
             }
         }
+        return idList;
     }
 
-    function getLocationFromID(id) {
-        if (!idList) {
-            return null;
-        }
-
-        var i, result;
-        for (i = 0; i < idList.length; i++) {
-            var fileLocation = idList[i];
-            if (fileLocation.id === id) {
-                result = fileLocation;
-                break;
-            }
-        }
-
-        return result;
-    }
 
     /**
      * @param {string} query what the user is searching for
-     * @returns {Array.<string>} sorted and filtered results that match the query
+     * @returns {Array.<SearchResult>} sorted and filtered results that match the query
      */
-    function search(query) {
-        createIDList();
-
+    function search(query, matcher) {
+        var idList = matcher.idList;
+        if (!idList) {
+            idList = createIDList();
+            matcher.idList = idList;
+        }
         query = query.slice(query.indexOf("@") + 1, query.length);
-        var filteredList = $.map(idList, function (itemInfo) {
-            if (itemInfo.id.toLowerCase().indexOf(query.toLowerCase()) !== -1) {
-                return itemInfo.id;
+        
+        // Filter and rank how good each match is
+        var filteredList = $.map(idList, function (fileLocation) {
+            var searchResult = matcher.match(fileLocation.id, query);
+            if (searchResult) {
+                searchResult.fileLocation = fileLocation;
             }
-        }).sort();
+            return searchResult;
+        });
+        
+        // Sort based on ranking & basic alphabetical order
+        QuickOpen.basicMatchSort(filteredList);
 
         return filteredList;
     }
@@ -144,20 +128,19 @@ define(function (require, exports, module) {
 
     /**
      * Select the selected item in the current document
-     * @param {HTMLLIElement} selectedItem
+     * @param {?SearchResult} selectedItem
      */
     function itemFocus(selectedItem) {
-        var fileLocation = getLocationFromID($(selectedItem).text());
-        if (fileLocation) {
-            var from = {line: fileLocation.line, ch: fileLocation.chFrom};
-            var to = {line: fileLocation.line, ch: fileLocation.chTo};
-            EditorManager.getCurrentFullEditor().setSelection(from, to);
+        if (!selectedItem) {
+            return;
         }
+        var fileLocation = selectedItem.fileLocation;
+        
+        var from = {line: fileLocation.line, ch: fileLocation.chFrom};
+        var to = {line: fileLocation.line, ch: fileLocation.chTo};
+        EditorManager.getCurrentFullEditor().setSelection(from, to, true);
     }
 
-    /**
-     * TODO: selectedItem is currently a <LI> item from smart auto complete container. It should just be data
-     */
     function itemSelect(selectedItem) {
         itemFocus(selectedItem);
     }
@@ -166,8 +149,8 @@ define(function (require, exports, module) {
     QuickOpen.addQuickOpenPlugin(
         {
             name: "html ids",
-            fileTypes: ["html"],
-            done: done,
+            languageIds: ["html"],
+            done: function () {},
             search: search,
             match: match,
             itemFocus: itemFocus,

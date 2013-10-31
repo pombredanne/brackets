@@ -27,9 +27,12 @@
 
 define(function (require, exports, module) {
     'use strict';
+
+    require("utils/Global");
     
     // Load dependent modules
     var NativeFileSystem        = require("file/NativeFileSystem").NativeFileSystem,
+        NativeFileError         = require("file/NativeFileError"),
         SpecRunnerUtils         = require("spec/SpecRunnerUtils");
     
     var Encodings               = NativeFileSystem.Encodings;
@@ -40,8 +43,75 @@ define(function (require, exports, module) {
         var _err;
 
         beforeEach(function () {
-            this.path = SpecRunnerUtils.getTestPath("/spec/NativeFileSystem-test-files");
-            this.file1content = "Here is file1";
+            var self = this;
+            
+            SpecRunnerUtils.createTempDirectory();
+
+            runs(function () {
+                var testFiles = SpecRunnerUtils.getTestPath("/spec/NativeFileSystem-test-files");
+                self.path = SpecRunnerUtils.getTempDirectory();
+
+                waitsForDone(SpecRunnerUtils.copyPath(testFiles, self.path));
+            });
+
+            runs(function () {
+                self.file1content = "Here is file1";
+            });
+        });
+        
+        describe("Checking file path", function () {
+            
+            it("should return false on absolute path", function () {
+                var deferred = new $.Deferred(),
+                    isRelative = true,
+                    path;
+                
+                //Set the correct path for the platform
+                if (brackets.platform === "win") {
+                    path = "C:\\an\\absolute\\path";
+                } else if (brackets.platform === "mac" || brackets.platform === "linux") {
+                    //Mac and Linux will have the same path type
+                    path = "/an/absolute/path";
+                }
+                
+                runs(function () {
+                    isRelative = NativeFileSystem.isRelativePath(path);
+                    deferred.resolve();
+                    waitsForDone(deferred, "isRelativePath", 2000);
+                });
+                
+                runs(function () {
+                    expect(isRelative).toBe(false);
+                });
+            });
+            
+            it("should return true on relative path", function () {
+                var deferred = new $.Deferred(),
+                    isRelative = false,
+                    path;
+                
+                //Set the correct path for the platform
+                if (brackets.platform === "win") {
+                    path = "a\\relative\\path";
+                } else if (brackets.platform === "mac" || brackets.platform === "linux") {
+                    //Mac and Linux will have the same path type
+                    path = "a/relative/path";
+                }
+                
+                runs(function () {
+                    isRelative = NativeFileSystem.isRelativePath(path);
+                    deferred.resolve();
+                    waitsForDone(deferred, "isRelativePath", 2000);
+                });
+                
+                runs(function () {
+                    expect(isRelative).toBe(true);
+                });
+            });
+        });
+
+        afterEach(function () {
+            SpecRunnerUtils.removeTempDirectory();
         });
 
         describe("Reading a directory", function () {
@@ -51,7 +121,7 @@ define(function (require, exports, module) {
                     deferred = new $.Deferred();
                 
                 function requestNativeFileSystemSuccessCB(nfs) {
-                    var reader = nfs.createReader();
+                    var reader = nfs.root.createReader();
 
                     var successCallback = function (e) { entries = e; deferred.resolve(); };
                     var errorCallback = function () { deferred.reject(); };
@@ -61,7 +131,7 @@ define(function (require, exports, module) {
                 
                 runs(function () {
                     NativeFileSystem.requestNativeFileSystem(this.path, requestNativeFileSystemSuccessCB);
-                    waitsForDone(deferred, "requestNativeFileSystem");
+                    waitsForDone(deferred, "requestNativeFileSystem", 2000);
                 });
 
                 runs(function () {
@@ -79,6 +149,34 @@ define(function (require, exports, module) {
                 });
             });
 
+            // This test is intermittently failing on the build machine, and 
+            // *only* on the build machine. Removing for now. Issue
+            // #2333 logged to resolve this.
+            xit("should be able to read a drive", function () {
+                var entries = null,
+                    deferred = new $.Deferred();
+                
+                function requestNativeFileSystemSuccessCB(nfs) {
+                    var reader = nfs.root.createReader();
+
+                    var successCallback = function (e) { entries = e; deferred.resolve(); };
+                    var errorCallback = function () { deferred.reject(); };
+
+                    reader.readEntries(successCallback, errorCallback);
+                }
+                
+                var drivePath = this.path.substr(0, this.path.indexOf("/") + 1);
+                
+                runs(function () {
+                    NativeFileSystem.requestNativeFileSystem(drivePath, requestNativeFileSystemSuccessCB);
+                    waitsForDone(deferred, "requestNativeFileSystem", 10000);
+                });
+
+                runs(function () {
+                    expect(entries).toBeTruthy();
+                });
+            });
+            
             it("should return an error if the directory doesn't exist", function () {
                 var deferred = new $.Deferred(),
                     error;
@@ -91,11 +189,11 @@ define(function (require, exports, module) {
                         deferred.reject();
                     });
                     
-                    waitsForFail(deferred, "requestNativeFileSystem");
+                    waitsForFail(deferred, "requestNativeFileSystem", 2000);
                 });
 
                 runs(function () {
-                    expect(error.code).toBe(FileError.NOT_FOUND_ERR);
+                    expect(error.name).toBe(NativeFileError.NOT_FOUND_ERR);
                 });
             });
 
@@ -119,7 +217,7 @@ define(function (require, exports, module) {
                 });
 
                 runs(function () {
-                    expect(error.code).toBe(FileError.SECURITY_ERR);
+                    expect(error.name).toBe(NativeFileError.SECURITY_ERR);
                 });
             });
 
@@ -137,7 +235,7 @@ define(function (require, exports, module) {
                 });
 
                 runs(function () {
-                    expect(entries).not.toBe(null);
+                    expect(entries).toBeTruthy();
                 });
             });
             
@@ -162,24 +260,22 @@ define(function (require, exports, module) {
                 function requestNativeFileSystemSuccessCB(nfs) {
                     accessedFolder = true;
                 
-                    function recreatePlaceholder(successCallback) {
-                        nfs.getFile("placeholder",
+                    function recreatePlaceholder(deferred) {
+                        nfs.root.getFile("placeholder",
                                     { create: true, exclusive: true },
-                                    function () { placeholderRecreated = true; },
-                                    function () { placeholderRecreated = false; });
+                                    function () { placeholderRecreated = true; deferred.resolve(); },
+                                    function () { placeholderRecreated = false; deferred.reject(); });
                     }
 
                     function readDirectory() {
-                        var reader = nfs.createReader();
+                        var reader = nfs.root.createReader();
                         var successCallback = function (e) {
                             entries = e;
-                            recreatePlaceholder();
-                            deferred.resolve();
+                            recreatePlaceholder(deferred);
                         };
                         var errorCallback = function () {
                             gotErrorReadingContents = true;
-                            recreatePlaceholder();
-                            deferred.reject();
+                            recreatePlaceholder(deferred);
                         };
                         reader.readEntries(successCallback, errorCallback);
                     }
@@ -211,7 +307,7 @@ define(function (require, exports, module) {
                         function () { deferred.reject(); }
                     );
                     
-                    waitsForDone(deferred, "requestNativeFileSystem");
+                    waitsForDone(deferred, "requestNativeFileSystem", 2000);
                 });
 
                 runs(function () {
@@ -226,10 +322,9 @@ define(function (require, exports, module) {
             it("should timeout with error when reading dir if low-level stat call takes too long", function () {
                 var statCalled = false, readComplete = false, gotError = false, theError = null;
                 var oldStat = brackets.fs.stat;
-                this.after(function () { brackets.fs.stat = oldStat; });
                 
                 function requestNativeFileSystemSuccessCB(nfs) {
-                    var reader = nfs.createReader();
+                    var reader = nfs.root.createReader();
                     
                     var successCallback = function (e) { readComplete = true; };
                     var errorCallback = function (error) { readComplete = true; gotError = true; theError = error; };
@@ -237,6 +332,12 @@ define(function (require, exports, module) {
                     // mock up new low-level stat that never calls the callback
                     brackets.fs.stat = function (path, callback) {
                         statCalled = true;
+
+                        // Can't do this as a spy or as a spec.after() because
+                        // after each callbacks (like SpecRunnerUtils.removeTempDirecotry)
+                        // will see the mock function still.
+                        // https://github.com/pivotal/jasmine/issues/236
+                        brackets.fs.stat = oldStat;
                     };
                     
                     reader.readEntries(successCallback, errorCallback);
@@ -246,13 +347,13 @@ define(function (require, exports, module) {
                     NativeFileSystem.requestNativeFileSystem(this.path, requestNativeFileSystemSuccessCB);
                 });
 
-                waitsFor(function () { return readComplete; }, NativeFileSystem.ASYNC_TIMEOUT * 2);
+                waitsFor(function () { return readComplete; }, "DirectoryReader.readEntries timeout", NativeFileSystem.ASYNC_TIMEOUT * 2);
                     
                 runs(function () {
                     expect(readComplete).toBe(true);
                     expect(statCalled).toBe(true);
                     expect(gotError).toBe(true);
-                    expect(theError.code).toBe(FileError.SECURITY_ERR);
+                    expect(theError.name).toBe(NativeFileError.SECURITY_ERR);
                 });
             });
         });
@@ -293,7 +394,7 @@ define(function (require, exports, module) {
 
             it("should return an error if the file is not found", function () {
                 var deferred = new $.Deferred(),
-                    errorCode;
+                    errorName;
                 
                 runs(function () {
                     var fileEntry = new NativeFileSystem.FileEntry(this.path + "/idontexist");
@@ -303,7 +404,7 @@ define(function (require, exports, module) {
                             deferred.resolve();
                         };
                         reader.onerror = function (event) {
-                            errorCode = event.target.error.code;
+                            errorName = event.target.error.name;
                             deferred.reject();
                         };
                         reader.readAsText(file, Encodings.UTF8);
@@ -313,7 +414,7 @@ define(function (require, exports, module) {
                 });
 
                 runs(function () {
-                    expect(errorCode).toBe(FileError.NOT_FOUND_ERR);
+                    expect(errorName).toBe(NativeFileError.NOT_FOUND_ERR);
                 });
             });
             
@@ -393,7 +494,6 @@ define(function (require, exports, module) {
 
             beforeEach(function () {
                 var nfs = null;
-                var chmodDone = false;
 
                 runs(function () {
                     NativeFileSystem.requestNativeFileSystem(this.path, function (fs) {
@@ -406,31 +506,19 @@ define(function (require, exports, module) {
                     this.nfs = nfs;
                 });
 
-                // set read-only permissions
+                // set permissions
                 runs(function () {
-                    brackets.fs.chmod(this.path + "/cant_read_here.txt", parseInt("222", 8), function (err) {
-                        _err = err;
-                        chmodDone = true;
-                    });
-                    brackets.fs.chmod(this.path + "/cant_write_here.txt", parseInt("444", 8), function (err) {
-                        _err = err;
-                        chmodDone = true;
-                    });
+                    waitsForDone(SpecRunnerUtils.chmod(this.path + "/cant_read_here.txt", "222"));
+                    waitsForDone(SpecRunnerUtils.chmod(this.path + "/cant_write_here.txt", "444"));
                 });
-                waitsFor(function () { return chmodDone && (_err === brackets.fs.NO_ERROR); }, 1000);
             });
 
             afterEach(function () {
-                var chmodDone = false;
-
-                // restore permissions for git
+                // restore permissions
                 runs(function () {
-                    brackets.fs.chmod(this.path + "/cant_read_here.txt", parseInt("777", 8), function (err) {
-                        _err = err;
-                        chmodDone = true;
-                    });
+                    waitsForDone(SpecRunnerUtils.chmod(this.path + "/cant_read_here.txt", "644"));
+                    waitsForDone(SpecRunnerUtils.chmod(this.path + "/cant_write_here.txt", "644"));
                 });
-                waitsFor(function () { return chmodDone && (_err === brackets.fs.NO_ERROR); }, 1000);
             });
 
             it("should create new, zero-length files", function () {
@@ -447,15 +535,14 @@ define(function (require, exports, module) {
                         writeComplete = true;
                     };
 
-                    // FIXME (issue #247): NativeFileSystem.root is missing
-                    this.nfs.getFile("new-zero-length-file.txt", { create: true, exclusive: true }, successCallback, errorCallback);
+                    this.nfs.root.getFile("new-zero-length-file.txt", { create: true, exclusive: true }, successCallback, errorCallback);
                 });
 
                 waitsFor(function () { return writeComplete; }, 1000);
 
                 // fileEntry is non-null on success
                 runs(function () {
-                    expect(fileEntry).not.toBe(null);
+                    expect(fileEntry).toBeTruthy();
                 });
 
                 var actualContents = null;
@@ -501,8 +588,7 @@ define(function (require, exports, module) {
                         writeComplete = true;
                     };
 
-                    // FIXME (issue #247): NativeFileSystem.root is missing
-                    this.nfs.getFile("does-not-exist.txt", { create: false }, successCallback, errorCallback);
+                    this.nfs.root.getFile("does-not-exist.txt", { create: false }, successCallback, errorCallback);
                 });
 
                 waitsFor(function () { return writeComplete; }, 1000);
@@ -510,7 +596,7 @@ define(function (require, exports, module) {
                 // fileEntry is null on error
                 runs(function () {
                     expect(fileEntry).toBe(null);
-                    expect(error.code).toBe(FileError.NOT_FOUND_ERR);
+                    expect(error.name).toBe(NativeFileError.NOT_FOUND_ERR);
                 });
             });
 
@@ -530,8 +616,7 @@ define(function (require, exports, module) {
                         writeComplete = true;
                     };
 
-                    // FIXME (issue #247): NativeFileSystem.root is missing
-                    this.nfs.getFile("file1", { create: true, exclusive: true }, successCallback, errorCallback);
+                    this.nfs.root.getFile("file1", { create: true, exclusive: true }, successCallback, errorCallback);
                 });
 
                 // wait for success or error to return
@@ -542,7 +627,7 @@ define(function (require, exports, module) {
                     expect(fileEntry).toBe(null);
 
                     // errorCallback should be called with PATH_EXISTS_ERR
-                    expect(error.code).toEqual(FileError.PATH_EXISTS_ERR);
+                    expect(error.name).toEqual(NativeFileError.PATH_EXISTS_ERR);
                 });
             });
 
@@ -562,8 +647,7 @@ define(function (require, exports, module) {
                         writeComplete = true;
                     };
 
-                    // FIXME (issue #247): NativeFileSystem.root is missing
-                    this.nfs.getFile("dir1", { create: false }, successCallback, errorCallback);
+                    this.nfs.root.getFile("dir1", { create: false }, successCallback, errorCallback);
                 });
 
                 // wait for success or error to return
@@ -574,7 +658,7 @@ define(function (require, exports, module) {
                     expect(fileEntry).toBe(null);
 
                     // errorCallback should be called with TYPE_MISMATCH_ERR
-                    expect(error.code).toEqual(FileError.TYPE_MISMATCH_ERR);
+                    expect(error.name).toEqual(NativeFileError.TYPE_MISMATCH_ERR);
                 });
             });
 
@@ -603,7 +687,7 @@ define(function (require, exports, module) {
                         writeComplete = true;
                     };
 
-                    this.nfs.getFile("file1", { create: false }, successCallback, errorCallback);
+                    this.nfs.root.getFile("file1", { create: false }, successCallback, errorCallback);
                 });
 
                 waitsFor(function () { return writeComplete && fileEntry; }, 1000);
@@ -660,7 +744,7 @@ define(function (require, exports, module) {
                         writeComplete = true;
                     };
 
-                    this.nfs.getFile("file1", { create: false }, successCallback, errorCallback);
+                    this.nfs.root.getFile("file1", { create: false }, successCallback, errorCallback);
                 });
 
                 waitsFor(function () { return writeComplete && fileEntry; }, 1000);
@@ -701,7 +785,7 @@ define(function (require, exports, module) {
 
                 // createWriter() should return an error for files it can't read
                 runs(function () {
-                    this.nfs.getFile(
+                    this.nfs.root.getFile(
                         "cant_read_here.txt",
                         { create: false },
                         function (entry) {
@@ -716,7 +800,7 @@ define(function (require, exports, module) {
 
                 runs(function () {
                     expect(complete).toBeFalsy();
-                    expect(error.code).toBe(FileError.NOT_READABLE_ERR);
+                    expect(error.name).toBe(NativeFileError.NOT_READABLE_ERR);
                 });
             });
 
@@ -743,15 +827,14 @@ define(function (require, exports, module) {
                         writeComplete = true;
                     };
 
-                    this.nfs.getFile("cant_write_here.txt", { create: false }, successCallback, errorCallback);
+                    this.nfs.root.getFile("cant_write_here.txt", { create: false }, successCallback, errorCallback);
                 });
 
                 // fileWriter.onerror handler should be invoked for read only files
                 waitsFor(
                     function () {
-                        return writeComplete
-                            && error
-                            && (error.code === FileError.NO_MODIFICATION_ALLOWED_ERR);
+                        return writeComplete && error &&
+                            (error.name === NativeFileError.NO_MODIFICATION_ALLOWED_ERR);
                     },
                     1000
                 );

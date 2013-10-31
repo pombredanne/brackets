@@ -48,58 +48,43 @@
 define(function CSSDocumentModule(require, exports, module) {
     "use strict";
 
-    var Inspector = require("LiveDevelopment/Inspector/Inspector");
-    var CSSAgent = require("LiveDevelopment/Agents/CSSAgent");
-    var HighlightAgent = require("LiveDevelopment/Agents/HighlightAgent");
+    var CSSAgent        = require("LiveDevelopment/Agents/CSSAgent"),
+        CSSUtils        = require("language/CSSUtils"),
+        EditorManager   = require("editor/EditorManager"),
+        HighlightAgent  = require("LiveDevelopment/Agents/HighlightAgent"),
+        Inspector       = require("LiveDevelopment/Inspector/Inspector");
 
     /** Constructor
      *
      * @param Document the source document from Brackets
      */
-    var CSSDocument = function CSSDocument(doc, editor, inspector) {
+    var CSSDocument = function CSSDocument(doc, editor) {
         this.doc = doc;
-        
-        // FUTURE: Highlighting is currently disabled, since this code doesn't yet know
-        // how to deal with different editors pointing at the same document.
-/*
-        this.editor = editor;
+
         this._highlight = [];
         this.onHighlight = this.onHighlight.bind(this);
         this.onCursorActivity = this.onCursorActivity.bind(this);
-        Inspector.on("HighlightAgent.highlight", this.onHighlight);
-*/
-        
+
         // Add a ref to the doc since we're listening for change events
         this.doc.addRef();
         this.onChange = this.onChange.bind(this);
         this.onDeleted = this.onDeleted.bind(this);
-        $(this.doc).on("change", this.onChange);
-        $(this.doc).on("deleted", this.onDeleted);
-
-/*
-        $(this.editor).on("cursorActivity", this.onCursorActivity);
-        this.onCursorActivity();
-*/
-
-        // get the style sheet
-        this.styleSheet = CSSAgent.styleForURL(this.doc.url);
-
-        // WebInspector Command: CSS.getStyleSheet
-        Inspector.CSS.getStyleSheet(this.styleSheet.styleSheetId, function callback(res) {
-            // res = {styleSheet}
-            this.rules = res.styleSheet.rules;
-        }.bind(this));
+        $(this.doc).on("change.CSSDocument", this.onChange);
+        $(this.doc).on("deleted.CSSDocument", this.onDeleted);
         
-        // If the CSS document is dirty, push the changes into the browser now
-        if (doc.isDirty) {
-            CSSAgent.reloadCSSForDocument(this.doc);
+        this.onActiveEditorChange = this.onActiveEditorChange.bind(this);
+        $(EditorManager).on("activeEditorChange", this.onActiveEditorChange);
+        
+        if (editor) {
+            // Attach now
+            this.attachToEditor(editor);
         }
     };
 
     /** Get the browser version of the StyleSheet object */
     CSSDocument.prototype.getStyleSheetFromBrowser = function getStyleSheetFromBrowser() {
         var deferred = new $.Deferred();
-        
+
         // WebInspector Command: CSS.getStyleSheet
         Inspector.CSS.getStyleSheet(this.styleSheet.styleSheetId, function callback(res) {
             // res = {styleSheet}
@@ -109,81 +94,140 @@ define(function CSSDocumentModule(require, exports, module) {
                 deferred.reject();
             }
         });
-        
+
         return deferred.promise();
     };
-    
+
     /** Get the browser version of the source */
     CSSDocument.prototype.getSourceFromBrowser = function getSourceFromBrowser() {
         var deferred = new $.Deferred();
-        
+
         this.getStyleSheetFromBrowser().done(function onDone(styleSheet) {
             deferred.resolve(styleSheet.text);
         }).fail(function onFail() {
             deferred.reject();
         });
-        
+
         return deferred.promise();
     };
-
+ 
     /** Close the document */
     CSSDocument.prototype.close = function close() {
-        $(this.doc).off("change", this.onChange);
-        $(this.doc).off("deleted", this.onDeleted);
+        $(this.doc).off(".CSSDocument");
+        $(EditorManager).off("activeEditorChange", this.onActiveEditorChange);
         this.doc.releaseRef();
-/*
-        Inspector.off("HighlightAgent.highlight", this.onHighlight);
-        $(this.editor).off("cursorActivity", this.onCursorActivity);
-        this.onHighlight();
-*/
+        this.detachFromEditor();
+    };
+ 
+    /**
+     * Force the browser to update if the file is dirty
+     */
+    CSSDocument.prototype._updateBrowser = function () {
+        // get the style sheet
+        this.styleSheet = CSSAgent.styleForURL(this.doc.url);
+
+        // If the CSS document is dirty, push the changes into the browser now
+        if (this.doc.isDirty) {
+            CSSAgent.reloadCSSForDocument(this.doc);
+        }
     };
 
-    // find a rule in the given rules
-    CSSDocument.prototype.ruleAtLocation = function ruleAtLocation(location) {
-        var i, rule;
-        for (i in this.rules) {
-            rule = this.rules[i];
-            if (rule.selectorRange.start <= location && location <= rule.style.range.end) {
-                return rule;
+    CSSDocument.prototype.attachToEditor = function (editor) {
+        this.editor = editor;
+        
+        if (this.editor) {
+            $(HighlightAgent).on("highlight", this.onHighlight);
+            $(this.editor).on("cursorActivity.CSSDocument", this.onCursorActivity);
+            this.updateHighlight();
+        }
+    };
+    
+    CSSDocument.prototype.detachFromEditor = function () {
+        if (this.editor) {
+            HighlightAgent.hide();
+            $(HighlightAgent).off("highlight", this.onHighlight);
+            $(this.editor).off(".CSSDocument");
+            this.onHighlight();
+            this.editor = null;
+        }
+    };
+
+    CSSDocument.prototype.updateHighlight = function () {
+        if (Inspector.config.highlight && this.editor) {
+            var codeMirror = this.editor._codeMirror;
+            var selector = CSSUtils.findSelectorAtDocumentPos(this.editor, codeMirror.getCursor());
+            if (selector) {
+                HighlightAgent.rule(selector);
+            } else {
+                HighlightAgent.hide();
             }
         }
-        return null;
     };
-
+    
+    /**
+     * Enable instrumented CSS
+     * @param enabled {boolean} 
+     */
+    CSSDocument.prototype.setInstrumentationEnabled = function setInstrumentationEnabled(enabled) {
+        // no-op
+        // "Instrumentation" is always enabled for CSS, we make no modifications
+    };
+    
+    /**
+     * Returns true if document edits appear live in the connected browser
+     * @return {boolean} 
+     */
+    CSSDocument.prototype.isLiveEditingEnabled = function () {
+        return true;
+    };
+    
+    /**
+     * Returns a JSON object with HTTP response overrides
+     * @returns {{body: string}}
+     */
+    CSSDocument.prototype.getResponseData = function getResponseData(enabled) {
+        return {
+            body: this.doc.getText()
+        };
+    };
 
     /** Event Handlers *******************************************************/
 
     /** Triggered on cursor activity of the editor */
     CSSDocument.prototype.onCursorActivity = function onCursorActivity(event, editor) {
-        if (Inspector.config.highlight) {
-            var codeMirror = this.editor._codeMirror;
-            var location = codeMirror.indexFromPos(codeMirror.getCursor());
-            var rule = this.ruleAtLocation(location);
-            if (rule) {
-                HighlightAgent.rule(rule.selectorText);
-            } else {
-                HighlightAgent.hide();
-            }
-        }
+        this.updateHighlight();
     };
 
     /** Triggered whenever the Document is edited */
     CSSDocument.prototype.onChange = function onChange(event, editor, change) {
         // brute force: update the CSS
         CSSAgent.reloadCSSForDocument(this.doc);
+        if (Inspector.config.highlight) {
+            HighlightAgent.redraw();
+        }
     };
+
     /** Triggered if the Document's file is deleted */
     CSSDocument.prototype.onDeleted = function onDeleted(event, editor, change) {
         // clear the CSS
         CSSAgent.clearCSSForDocument(this.doc);
-        
+
         // shut down, since our Document is now dead
         this.close();
         $(this).triggerHandler("deleted", [this]);
     };
 
+    /** Triggered when the active editor changes */
+    CSSDocument.prototype.onActiveEditorChange = function (event, newActive, oldActive) {
+        this.detachFromEditor();
+        
+        if (newActive && newActive.document === this.doc) {
+            this.attachToEditor(newActive);
+        }
+    };
+    
     /** Triggered by the HighlightAgent to highlight a node in the editor */
-    CSSDocument.prototype.onHighlight = function onHighlight(node) {
+    CSSDocument.prototype.onHighlight = function onHighlight(event, node) {
         // clear an existing highlight
         var i;
         for (i in this._highlight) {
@@ -204,7 +248,7 @@ define(function CSSDocumentModule(require, exports, module) {
                 if (rule.ruleId && rule.ruleId.styleSheetId === this.styleSheet.styleSheetId) {
                     from = codeMirror.posFromIndex(rule.selectorRange.start);
                     to = codeMirror.posFromIndex(rule.style.range.end);
-                    this._highlight.push(codeMirror.markText(from, to, "highlight"));
+                    this._highlight.push(codeMirror.markText(from, to, { className: "highlight" }));
                 }
             }
         }.bind(this));
